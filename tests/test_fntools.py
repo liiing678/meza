@@ -160,6 +160,25 @@ class TestIterStringIO:
         assert 20 == len(next(ft.chunk(r.iter_content, 20, 29, 200)))
         assert 55 == len(next(ft.chunk(r.iter_content)))
 
+    def test_chunk_window(self):
+        content = StringIO("Iñtërnâtiônàližætiøn")
+        assert "Iñtër" == next(ft.chunk(content, 5, 0, 10))
+        assert [] == list(ft.chunk(StringIO("Iñtërnâtiônàližætiøn"), 5, 0, 0))
+
+        # the last chunk holds the remainder of the window
+        chunks = list(ft.chunk(StringIO("abcdefghijkl"), 5, 0, 12))
+        assert ["abcde", "fghij", "kl"] == chunks
+
+        # `stop` must not truncate the underlying file
+        with open(__file__, "r") as f:
+            before = f.seek(0, 2)
+            f.seek(0)
+            list(ft.chunk(f, 100, 0, 300))
+            assert before == f.seek(0, 2)
+
+        # a non-positive chunksize means "all"
+        assert [[1, 2, 3]] == list(ft.chunk([1, 2, 3], -2))
+
     def test_combine(self):
         records = [{"a": 1, "b": 2, "c": 3}, {"b": 4, "c": 5, "d": 6}]
 

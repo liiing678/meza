@@ -661,15 +661,45 @@ def chunk(content, chunksize=None, start=0, stop=None):
         [1, 2, 3, 4, 5, 6]
         >>> next(chunk([1, 2, 3, 4, 5, 6], 2))
         [1, 2]
+        >>> from io import StringIO
+        >>> next(chunk(StringIO('Iñtërnâtiônàližætiøn'), 5, 0, 10))
+        'Iñtër'
+        >>> list(chunk(StringIO('Iñtërnâtiônàližætiøn'), 5, 0, 0))
+        []
     """
+    # a non-positive `chunksize` means "all", i.e., no chunking
+    chunksize = chunksize if chunksize and chunksize > 0 else None
+
     if hasattr(content, "read"):  # it's a file
         content.seek(start) if start else None
-        content.truncate(stop) if stop else None
 
-        if chunksize:
-            generator = (content.read(chunksize) for _ in it.count())
+        if stop is None:
+            if chunksize:
+                generator = (content.read(chunksize) for _ in it.count())
+            else:
+                generator = iter([content.read()])
         else:
-            generator = iter([content.read()])
+            # Read only the [start, stop) window. Unlike `truncate`, this
+            # neither mutates the file nor requires write access to it.
+            try:
+                remaining = stop - (content.tell() or 0)
+            except (AttributeError, OSError):
+                remaining = stop - start
+
+            def windowed():
+                nonlocal remaining
+
+                while remaining > 0:
+                    size = min(chunksize, remaining) if chunksize else remaining
+                    data = content.read(size)
+
+                    if not data:
+                        break
+
+                    yield data
+                    remaining -= len(data)
+
+            generator = windowed()
     elif callable(content):  # it's an r.iter_content
         chunksize = chunksize or MAXINT
 
