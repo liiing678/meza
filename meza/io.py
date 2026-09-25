@@ -101,8 +101,7 @@ class IterStringIO(TextIOBase):
             True
         """
         iterable = iterable if iterable else []
-        chained = chain(iterable)
-        self.iter = encode(chained)
+        self.iter = self._normalize(iterable)
         self.decode = decode
         self.bufsize = bufsize
 
@@ -110,6 +109,68 @@ class IterStringIO(TextIOBase):
         # by `num` of bytes??
         self.last = deque(bytearray(), self.bufsize)
         self.pos = 0
+        self._pending = deque()
+
+    @staticmethod
+    def _normalize(iterable):
+        """Lazily yields the content as single byte `bytes` units.
+
+        Accepts an iterable of `str`, `bytes`/`bytearray`, or `int` chunks of
+        any size. Only the chunk currently being processed is materialized,
+        so arbitrarily large content is never read into memory at once.
+        """
+        for chunk in iterable:
+            if isinstance(chunk, int):
+                yield bytes((chunk,))
+            elif isinstance(chunk, str):
+                for unit in chunk.encode(ENCODING):
+                    yield bytes((unit,))
+            else:
+                for unit in chunk:
+                    yield bytes((unit,))
+
+    def _split_lines(self):
+        """Lazily splits the stream into (non blank) lines of byte units.
+
+        Handles `\n`, `\r`, and `\r\n` (even when a separator is split
+        across two chunks) and always yields a final line that isn't
+        terminated by a newline.
+        """
+        line = []
+        skip_lf = False
+
+        while True:
+            # `self.iter` is re-evaluated on each pass so that `seek` and
+            # `write` (which rebind it) are picked up
+            try:
+                unit = next(self.iter)
+            except StopIteration:
+                break
+
+            if skip_lf:
+                # swallow the `\n` of a `\r\n` pair; since blank lines are
+                # skipped anyway, losing this state when the generator is
+                # abandoned after a `yield` is harmless
+                skip_lf = False
+
+                if unit == b"\n":
+                    continue
+
+            if unit == b"\r":
+                if line:
+                    yield line
+                    line = []
+
+                skip_lf = True
+            elif unit == b"\n":
+                if line:
+                    yield line
+                    line = []
+            else:
+                line.append(unit)
+
+        if line:
+            yield line
 
     def __next__(self):
         return self._read(next(self.lines))
@@ -121,26 +182,24 @@ class IterStringIO(TextIOBase):
     def lines(self):
         """Read all the lines of content"""
         # TODO: what about a csv with embedded newlines?
-        groups = groupby_line(self.iter)
-        return (g for k, g in groups if k)
+        return self._split_lines()
 
     def _read(self, iterable, num=None, newline=True):
         """Helper method used to read content"""
         content = it.islice(iterable, num) if num else iterable
 
         byte = ft.byte(content)
-        self.last.extend(byte)
-        self.pos += num or len(byte)
+        self.last.extend(bytes((unit,)) for unit in byte)
+        self.pos += len(byte)
 
         if newline:
-            self.last.append(os.linesep)
+            self.last.extend(bytes((unit,)) for unit in os.linesep.encode(ENCODING))
 
         return byte.decode(ENCODING) if self.decode else bytes(byte)
 
     def write(self, iterable):
         """Write the content"""
-        chained = chain(iterable)
-        self.iter = it.chain(self.iter, encode(chained))
+        self.iter = it.chain(self.iter, self._normalize(iterable))
 
     def read(self, num=None):
         """Read the content"""
@@ -148,7 +207,17 @@ class IterStringIO(TextIOBase):
 
     def readline(self, num=None):
         """Read a line of content"""
-        return self._read(next(self.lines), num)
+        if self._pending:
+            line = list(self._pending)
+            self._pending.clear()
+        else:
+            line = next(self.lines)
+
+        if num:
+            line, rest = line[:num], line[num:]
+            self._pending.extend(rest)
+
+        return self._read(line)
 
     def readlines(self):
         """Read all the lines of content"""
@@ -163,12 +232,16 @@ class IterStringIO(TextIOBase):
             self.iter = it.chain(self.last, self.iter)
             self.last = deque([], self.bufsize)
         elif self.pos > num > beg_buf:
-            extend = [self.last.pop() for _ in range(self.pos - num)]
+            count = min(self.pos - num, len(self.last))
+            extend = [self.last.pop() for _ in range(count)]
             self.iter = it.chain(reversed(extend), self.iter)
         elif num == self.pos:
             pass
         elif num == next_pos:
-            self.last.append(next(self.iter))
+            try:
+                self.last.append(next(self.iter))
+            except StopIteration:
+                pass
         elif num > next_pos:
             pos = num - self.pos
             [self.last.append(x) for x in it.islice(self.iter, 0, pos)]
